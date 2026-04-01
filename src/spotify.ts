@@ -3,6 +3,25 @@ const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const SPOTIFY_API_URL = "https://api.spotify.com/v1";
 const SCOPES = "user-read-currently-playing user-read-playback-state user-modify-playback-state streaming";
 
+// In-memory token store (fallback when localStorage is blocked in iframes)
+const memStore: { accessToken: string | null; refreshToken: string | null; expiry: number } = {
+  accessToken: null,
+  refreshToken: null,
+  expiry: 0,
+};
+
+function storageSet(key: string, value: string): void {
+  try { localStorage.setItem(key, value); } catch { /* blocked in third-party iframe */ }
+}
+
+function storageGet(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storageRemove(key: string): void {
+  try { localStorage.removeItem(key); } catch { /* blocked */ }
+}
+
 function getRedirectUri(): string {
   return window.location.origin + window.location.pathname;
 }
@@ -33,7 +52,7 @@ export async function redirectToSpotifyAuth(clientId: string): Promise<void> {
   const hashed = await sha256(codeVerifier);
   const codeChallenge = base64UrlEncode(hashed);
 
-  localStorage.setItem("spotify_code_verifier", codeVerifier);
+  storageSet("spotify_code_verifier", codeVerifier);
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -51,7 +70,7 @@ export async function exchangeCodeForToken(
   clientId: string,
   code: string
 ): Promise<TokenResponse> {
-  const codeVerifier = localStorage.getItem("spotify_code_verifier");
+  const codeVerifier = storageGet("spotify_code_verifier");
   if (!codeVerifier) throw new Error("Missing code verifier");
 
   const response = await fetch(SPOTIFY_TOKEN_URL, {
@@ -70,7 +89,7 @@ export async function exchangeCodeForToken(
 
   const data = await response.json();
   saveTokens(data);
-  localStorage.removeItem("spotify_code_verifier");
+  storageRemove("spotify_code_verifier");
 
   // Clean up URL
   window.history.replaceState({}, document.title, window.location.pathname);
@@ -79,7 +98,7 @@ export async function exchangeCodeForToken(
 }
 
 export async function refreshAccessToken(clientId: string): Promise<TokenResponse> {
-  const refreshToken = localStorage.getItem("spotify_refresh_token");
+  const refreshToken = memStore.refreshToken ?? storageGet("spotify_refresh_token");
   if (!refreshToken) throw new Error("No refresh token");
 
   const response = await fetch(SPOTIFY_TOKEN_URL, {
@@ -93,9 +112,12 @@ export async function refreshAccessToken(clientId: string): Promise<TokenRespons
   });
 
   if (!response.ok) {
-    localStorage.removeItem("spotify_access_token");
-    localStorage.removeItem("spotify_refresh_token");
-    localStorage.removeItem("spotify_token_expiry");
+    memStore.accessToken = null;
+    memStore.refreshToken = null;
+    memStore.expiry = 0;
+    storageRemove("spotify_access_token");
+    storageRemove("spotify_refresh_token");
+    storageRemove("spotify_token_expiry");
     throw new Error("Token refresh failed");
   }
 
@@ -105,21 +127,26 @@ export async function refreshAccessToken(clientId: string): Promise<TokenRespons
 }
 
 function saveTokens(data: TokenResponse): void {
-  localStorage.setItem("spotify_access_token", data.access_token);
+  memStore.accessToken = data.access_token;
   if (data.refresh_token) {
-    localStorage.setItem("spotify_refresh_token", data.refresh_token);
+    memStore.refreshToken = data.refresh_token;
   }
-  const expiry = Date.now() + data.expires_in * 1000;
-  localStorage.setItem("spotify_token_expiry", expiry.toString());
+  memStore.expiry = Date.now() + data.expires_in * 1000;
+
+  storageSet("spotify_access_token", data.access_token);
+  if (data.refresh_token) {
+    storageSet("spotify_refresh_token", data.refresh_token);
+  }
+  storageSet("spotify_token_expiry", memStore.expiry.toString());
 }
 
 export async function getValidAccessToken(clientId: string): Promise<string | null> {
-  const token = localStorage.getItem("spotify_access_token");
-  const expiry = localStorage.getItem("spotify_token_expiry");
+  const token = memStore.accessToken ?? storageGet("spotify_access_token");
+  const expiry = memStore.expiry || parseInt(storageGet("spotify_token_expiry") ?? "0");
 
   if (!token || !expiry) return null;
 
-  if (Date.now() > parseInt(expiry) - 60_000) {
+  if (Date.now() > expiry - 60_000) {
     try {
       const data = await refreshAccessToken(clientId);
       return data.access_token;
@@ -129,6 +156,11 @@ export async function getValidAccessToken(clientId: string): Promise<string | nu
   }
 
   return token;
+}
+
+export function setRefreshToken(token: string): void {
+  memStore.refreshToken = token;
+  storageSet("spotify_refresh_token", token);
 }
 
 export interface TokenResponse {

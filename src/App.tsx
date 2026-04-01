@@ -5,6 +5,7 @@ import {
   getValidAccessToken,
   getCurrentlyPlaying,
   refreshAccessToken,
+  setRefreshToken,
   createPlayer,
   transferPlayback,
   type NowPlaying,
@@ -65,7 +66,7 @@ export default function App({ clientId }: AppProps) {
   useEffect(() => {
     if (!refreshTokenParam || !clientId) return;
 
-    localStorage.setItem("spotify_refresh_token", refreshTokenParam);
+    setRefreshToken(refreshTokenParam);
 
     let mounted = true;
     refreshAccessToken(clientId)
