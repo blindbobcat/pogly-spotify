@@ -6,7 +6,11 @@ import {
   getCurrentlyPlaying,
   isAuthenticated,
   logout,
+  createPlayer,
+  transferPlayback,
   type NowPlaying,
+  type SpotifyPlayer,
+  type PlayerState,
 } from "./spotify";
 
 const POLL_INTERVAL = 3000;
@@ -20,9 +24,18 @@ export default function App({ clientId }: AppProps) {
   const [authed, setAuthed] = useState(isAuthenticated());
   const [error, setError] = useState<string | null>(null);
   const [visible, setVisible] = useState(false);
+  const [playerReady, setPlayerReady] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const progressRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<number>(0);
-  const lastFetchRef = useRef<{ progressMs: number; durationMs: number; timestamp: number } | null>(null);
+  const lastFetchRef = useRef<{
+    progressMs: number;
+    durationMs: number;
+    timestamp: number;
+  } | null>(null);
+  const playerRef = useRef<SpotifyPlayer | null>(null);
+  const deviceIdRef = useRef<string | null>(null);
 
   // Handle OAuth callback
   useEffect(() => {
@@ -38,9 +51,71 @@ export default function App({ clientId }: AppProps) {
     }
   }, [clientId]);
 
-  // Poll currently playing
+  // Initialize Web Playback SDK
+  useEffect(() => {
+    if (!authed || !clientId) return;
+
+    let mounted = true;
+
+    const initPlayer = async () => {
+      try {
+        const player = await createPlayer(
+          clientId,
+          "Pogly Spotify Widget",
+          0.5,
+          async (deviceId) => {
+            if (!mounted) return;
+            deviceIdRef.current = deviceId;
+            setPlayerReady(true);
+            // Transfer playback to this widget
+            const token = await getValidAccessToken(clientId);
+            if (token) {
+              await transferPlayback(token, deviceId);
+            }
+          },
+          (state: PlayerState | null) => {
+            if (!mounted || !state) return;
+            setIsPlaying(!state.paused);
+            const track = state.track_window.current_track;
+            setNowPlaying({
+              isPlaying: !state.paused,
+              trackName: track.name,
+              artistName: track.artists.map((a) => a.name).join(", "),
+              albumName: track.album.name,
+              albumArt: track.album.images[0]?.url ?? "",
+              progressMs: state.position,
+              durationMs: state.duration,
+              trackUrl: "",
+            });
+            lastFetchRef.current = {
+              progressMs: state.position,
+              durationMs: state.duration,
+              timestamp: Date.now(),
+            };
+          },
+          (msg) => {
+            if (!mounted) return;
+            console.error("Spotify Player Error:", msg);
+          }
+        );
+        if (mounted) playerRef.current = player;
+      } catch {
+        // SDK failed — fall back to polling API
+        if (mounted) setPlayerReady(false);
+      }
+    };
+
+    initPlayer();
+
+    return () => {
+      mounted = false;
+      playerRef.current?.disconnect();
+    };
+  }, [authed, clientId]);
+
+  // Fallback: poll API if SDK not available
   const fetchNowPlaying = useCallback(async () => {
-    if (!clientId) return;
+    if (!clientId || playerReady) return;
     const token = await getValidAccessToken(clientId);
     if (!token) {
       setAuthed(false);
@@ -54,24 +129,25 @@ export default function App({ clientId }: AppProps) {
           durationMs: data.durationMs,
           timestamp: Date.now(),
         };
+        setIsPlaying(data.isPlaying);
       }
       setNowPlaying(data);
       setError(null);
     } catch {
       setError("Failed to fetch playback");
     }
-  }, [clientId]);
+  }, [clientId, playerReady]);
 
   useEffect(() => {
-    if (!authed) return;
+    if (!authed || playerReady) return;
     fetchNowPlaying();
     const interval = setInterval(fetchNowPlaying, POLL_INTERVAL);
     return () => clearInterval(interval);
-  }, [authed, fetchNowPlaying]);
+  }, [authed, fetchNowPlaying, playerReady]);
 
-  // Animate progress bar smoothly between polls
+  // Animate progress bar smoothly
   useEffect(() => {
-    if (!nowPlaying?.isPlaying || !progressRef.current) {
+    if (!isPlaying || !progressRef.current) {
       cancelAnimationFrame(animationRef.current);
       return;
     }
@@ -88,24 +164,67 @@ export default function App({ clientId }: AppProps) {
 
     animationRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(animationRef.current);
-  }, [nowPlaying]);
+  }, [isPlaying]);
 
   // Show/hide animation
   useEffect(() => {
-    if (nowPlaying?.isPlaying) {
+    if (nowPlaying) {
       setVisible(true);
     } else {
       const timeout = setTimeout(() => setVisible(false), 500);
       return () => clearTimeout(timeout);
     }
-  }, [nowPlaying?.isPlaying]);
+  }, [nowPlaying]);
+
+  // Playback controls
+  const handleTogglePlay = async () => {
+    if (playerRef.current) {
+      await playerRef.current.togglePlay();
+    } else {
+      // Fallback: use API
+      const token = await getValidAccessToken(clientId);
+      if (!token) return;
+      const endpoint = isPlaying ? "pause" : "play";
+      await fetch(`https://api.spotify.com/v1/me/player/${endpoint}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setIsPlaying(!isPlaying);
+    }
+  };
+
+  const handleNext = async () => {
+    if (playerRef.current) {
+      await playerRef.current.nextTrack();
+    } else {
+      const token = await getValidAccessToken(clientId);
+      if (!token) return;
+      await fetch("https://api.spotify.com/v1/me/player/next", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+  };
+
+  const handlePrev = async () => {
+    if (playerRef.current) {
+      await playerRef.current.previousTrack();
+    } else {
+      const token = await getValidAccessToken(clientId);
+      if (!token) return;
+      await fetch("https://api.spotify.com/v1/me/player/previous", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+  };
 
   if (!clientId) {
     return (
       <div className="setup">
         <p>
-          Missing <code>client_id</code> parameter. Set your Spotify Client ID in
-          the Pogly widget variables.
+          Missing <code>client_id</code> parameter. Set your Spotify Client ID
+          in the Pogly widget variables.
         </p>
       </div>
     );
@@ -114,7 +233,10 @@ export default function App({ clientId }: AppProps) {
   if (!authed) {
     return (
       <div className="setup">
-        <button className="auth-btn" onClick={() => redirectToSpotifyAuth(clientId)}>
+        <button
+          className="auth-btn"
+          onClick={() => redirectToSpotifyAuth(clientId)}
+        >
           Connect Spotify
         </button>
         {error && <p className="error">{error}</p>}
@@ -145,15 +267,59 @@ export default function App({ clientId }: AppProps) {
   }
 
   return (
-    <div className={`widget ${visible ? "visible" : "hidden"}`}>
+    <div
+      className={`widget ${visible ? "visible" : "hidden"}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       {nowPlaying && (
         <>
           <div className="album-art">
             <img src={nowPlaying.albumArt} alt={nowPlaying.albumName} />
+            {hovered && (
+              <button className="play-overlay" onClick={handleTogglePlay}>
+                {isPlaying ? (
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
+                    <rect x="6" y="4" width="4" height="16" rx="1" />
+                    <rect x="14" y="4" width="4" height="16" rx="1" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
           <div className="track-info">
             <div className="track-name">{nowPlaying.trackName}</div>
             <div className="artist-name">{nowPlaying.artistName}</div>
+            {hovered && (
+              <div className="controls">
+                <button className="ctrl-btn" onClick={handlePrev}>
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                    <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
+                  </svg>
+                </button>
+                <button className="ctrl-btn ctrl-play" onClick={handleTogglePlay}>
+                  {isPlaying ? (
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                      <rect x="6" y="4" width="4" height="16" rx="1" />
+                      <rect x="14" y="4" width="4" height="16" rx="1" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                  )}
+                </button>
+                <button className="ctrl-btn" onClick={handleNext}>
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                    <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+                  </svg>
+                </button>
+              </div>
+            )}
             <div className="progress-bar">
               <div className="progress-fill" ref={progressRef} />
             </div>

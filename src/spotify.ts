@@ -1,7 +1,7 @@
 const SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize";
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const SPOTIFY_API_URL = "https://api.spotify.com/v1";
-const SCOPES = "user-read-currently-playing user-read-playback-state";
+const SCOPES = "user-read-currently-playing user-read-playback-state user-modify-playback-state streaming";
 
 function getRedirectUri(): string {
   return window.location.origin + window.location.pathname;
@@ -191,4 +191,125 @@ export function logout(): void {
   localStorage.removeItem("spotify_refresh_token");
   localStorage.removeItem("spotify_token_expiry");
   localStorage.removeItem("spotify_code_verifier");
+}
+
+// ─── Web Playback SDK ───
+
+declare global {
+  interface Window {
+    onSpotifyWebPlaybackSDKReady: () => void;
+    Spotify: {
+      Player: new (options: {
+        name: string;
+        getOAuthToken: (cb: (token: string) => void) => void;
+        volume: number;
+      }) => SpotifyPlayer;
+    };
+  }
+}
+
+export interface SpotifyPlayer {
+  connect: () => Promise<boolean>;
+  disconnect: () => void;
+  addListener: (event: string, cb: (state: PlayerState | WebPlaybackError | { device_id: string }) => void) => void;
+  removeListener: (event: string) => void;
+  getCurrentState: () => Promise<PlayerState | null>;
+  togglePlay: () => Promise<void>;
+  nextTrack: () => Promise<void>;
+  previousTrack: () => Promise<void>;
+  seek: (positionMs: number) => Promise<void>;
+  setVolume: (volume: number) => Promise<void>;
+}
+
+export interface PlayerState {
+  paused: boolean;
+  position: number;
+  duration: number;
+  track_window: {
+    current_track: {
+      name: string;
+      artists: { name: string }[];
+      album: {
+        name: string;
+        images: { url: string }[];
+      };
+    };
+  };
+}
+
+interface WebPlaybackError {
+  message: string;
+}
+
+let sdkLoaded = false;
+
+function loadPlaybackSDK(): Promise<void> {
+  if (sdkLoaded || document.getElementById("spotify-sdk")) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const script = document.createElement("script");
+    script.id = "spotify-sdk";
+    script.src = "https://sdk.scdn.co/spotify-player.js";
+    script.async = true;
+    document.body.appendChild(script);
+
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      sdkLoaded = true;
+      resolve();
+    };
+  });
+}
+
+export async function createPlayer(
+  clientId: string,
+  name: string,
+  volume: number,
+  onReady: (deviceId: string) => void,
+  onStateChange: (state: PlayerState | null) => void,
+  onError: (msg: string) => void
+): Promise<SpotifyPlayer> {
+  await loadPlaybackSDK();
+
+  const player = new window.Spotify.Player({
+    name,
+    getOAuthToken: async (cb) => {
+      const token = await getValidAccessToken(clientId);
+      if (token) cb(token);
+    },
+    volume,
+  });
+
+  player.addListener("ready", (data) => {
+    const { device_id } = data as { device_id: string };
+    onReady(device_id);
+  });
+
+  player.addListener("not_ready", () => {
+    onError("Device went offline");
+  });
+
+  player.addListener("player_state_changed", (state) => {
+    onStateChange(state as PlayerState | null);
+  });
+
+  player.addListener("initialization_error", (e) => onError((e as WebPlaybackError).message));
+  player.addListener("authentication_error", (e) => onError((e as WebPlaybackError).message));
+  player.addListener("account_error", (e) => onError((e as WebPlaybackError).message));
+
+  const connected = await player.connect();
+  if (!connected) throw new Error("Failed to connect player");
+
+  return player;
+}
+
+export async function transferPlayback(accessToken: string, deviceId: string): Promise<void> {
+  await fetch(`${SPOTIFY_API_URL}/me/player`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ device_ids: [deviceId], play: true }),
+  });
 }

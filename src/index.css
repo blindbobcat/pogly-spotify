@@ -186,3 +186,64 @@ html, body, #root {
   opacity: 0.7;
   margin-top: 2px;
 }
+
+/* ─── Playback Controls ─── */
+
+.album-art {
+  position: relative;
+}
+
+.play-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.play-overlay:hover {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ctrl-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  transform: scale(1.1);
+}
+
+.ctrl-play {
+  width: 34px;
+  height: 34px;
+  background: var(--accent);
+}
+
+.ctrl-play:hover {
+  background: #1ed760;
+}
