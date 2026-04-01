@@ -3,19 +3,24 @@
   "widgetWidth": 420,
   "widgetHeight": 100,
   "headerTag": "",
-  "bodyTag": "<iframe src=\"{widget_url}?client_id={client_id}\" allowtransparency=\"true\" allow=\"encrypted-media\"></iframe>",
-  "styleTag": "* { margin: 0; padding: 0; overflow: hidden; } body { background: transparent; } iframe { width: 100%; height: 100%; border: none; background: transparent; }",
+  "bodyTag": "<iframe src=\"{widget_url}?client_id={client_id}&refresh_token={refresh_token}\" allowtransparency=\"true\" allow=\"encrypted-media; autoplay\"></iframe>",
+  "styleTag": "* { margin: 0; padding: 0; border: 0; overflow: hidden!important; } html, body { width: 100%; height: 100%; overflow: hidden!important; background-color: rgba(0,0,0,0); } iframe { width: 100%; height: 100%; border: none; overflow: hidden!important; display: block; background-color: rgba(0,0,0,0); }",
   "scriptTag": "",
   "variables": [
     {
       "variableName": "client_id",
+      "variableType": 1,
+      "variableValue": "59094ec021ed409fb0e6069970bffc8c"
+    },
+    {
+      "variableName": "refresh_token",
       "variableType": 1,
       "variableValue": ""
     },
     {
       "variableName": "widget_url",
       "variableType": 1,
-      "variableValue": "../spotify-now-playing/"
+      "variableValue": "https://blindbobcat.github.io/pogly-spotify/"
     }
   ]
 }

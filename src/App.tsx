@@ -4,8 +4,7 @@ import {
   exchangeCodeForToken,
   getValidAccessToken,
   getCurrentlyPlaying,
-  isAuthenticated,
-  logout,
+  refreshAccessToken,
   createPlayer,
   transferPlayback,
   type NowPlaying,
@@ -21,9 +20,12 @@ interface AppProps {
 
 export default function App({ clientId }: AppProps) {
   const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
-  const [authed, setAuthed] = useState(isAuthenticated());
+  const [authed, setAuthed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [visible, setVisible] = useState(false);
+  const [setupMode, setSetupMode] = useState(false);
+  const [setupToken, setSetupToken] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -35,21 +37,47 @@ export default function App({ clientId }: AppProps) {
     timestamp: number;
   } | null>(null);
   const playerRef = useRef<SpotifyPlayer | null>(null);
-  const deviceIdRef = useRef<string | null>(null);
 
-  // Handle OAuth callback
+  // Read refresh_token from URL params
+  const params = new URLSearchParams(window.location.search);
+  const refreshTokenParam = params.get("refresh_token");
+
+  // Handle OAuth callback (setup mode — user authenticating in browser tab)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get("code");
     if (code && clientId) {
+      setSetupMode(true);
       exchangeCodeForToken(clientId, code)
         .then(() => {
-          setAuthed(true);
-          setError(null);
+          const rt = localStorage.getItem("spotify_refresh_token");
+          if (rt) {
+            setSetupToken(rt);
+          } else {
+            setError("No refresh token received. Try again.");
+          }
         })
         .catch(() => setError("Authentication failed. Try again."));
     }
   }, [clientId]);
+
+  // If refresh_token is in URL, store it and mark as authed
+  useEffect(() => {
+    if (!refreshTokenParam || !clientId) return;
+
+    localStorage.setItem("spotify_refresh_token", refreshTokenParam);
+
+    let mounted = true;
+    refreshAccessToken(clientId)
+      .then(() => {
+        if (mounted) setAuthed(true);
+      })
+      .catch(() => {
+        if (mounted) setError("Invalid refresh token");
+      });
+
+    return () => { mounted = false; };
+  }, [refreshTokenParam, clientId]);
 
   // Initialize Web Playback SDK
   useEffect(() => {
@@ -65,9 +93,7 @@ export default function App({ clientId }: AppProps) {
           0.5,
           async (deviceId) => {
             if (!mounted) return;
-            deviceIdRef.current = deviceId;
             setPlayerReady(true);
-            // Transfer playback to this widget
             const token = await getValidAccessToken(clientId);
             if (token) {
               await transferPlayback(token, deviceId);
@@ -100,7 +126,6 @@ export default function App({ clientId }: AppProps) {
         );
         if (mounted) playerRef.current = player;
       } catch {
-        // SDK failed — fall back to polling API
         if (mounted) setPlayerReady(false);
       }
     };
@@ -181,7 +206,6 @@ export default function App({ clientId }: AppProps) {
     if (playerRef.current) {
       await playerRef.current.togglePlay();
     } else {
-      // Fallback: use API
       const token = await getValidAccessToken(clientId);
       if (!token) return;
       const endpoint = isPlaying ? "pause" : "play";
@@ -219,18 +243,66 @@ export default function App({ clientId }: AppProps) {
     }
   };
 
+  // ─── Setup Mode: show refresh token to copy ───
+  if (setupMode) {
+    return (
+      <div className="setup">
+        {setupToken ? (
+          <>
+            <p style={{ color: "#1db954", fontWeight: 600 }}>Authenticated!</p>
+            <p>Copy this refresh token into your Pogly widget URL:</p>
+            <code
+              className="token-box"
+              onClick={() => {
+                navigator.clipboard.writeText(setupToken);
+                setCopied(true);
+              }}
+            >
+              {setupToken.slice(0, 40)}...
+            </code>
+            <button
+              className="auth-btn"
+              onClick={() => {
+                navigator.clipboard.writeText(setupToken);
+                setCopied(true);
+              }}
+            >
+              {copied ? "Copied!" : "Copy Token"}
+            </button>
+            <p className="hint">
+              In Pogly, set the widget <code>refresh_token</code> variable to
+              this value.
+            </p>
+          </>
+        ) : error ? (
+          <>
+            <p className="error">{error}</p>
+            <button
+              className="auth-btn"
+              onClick={() => redirectToSpotifyAuth(clientId)}
+            >
+              Try Again
+            </button>
+          </>
+        ) : (
+          <p>Authenticating...</p>
+        )}
+      </div>
+    );
+  }
+
   if (!clientId) {
     return (
       <div className="setup">
         <p>
-          Missing <code>client_id</code> parameter. Set your Spotify Client ID
-          in the Pogly widget variables.
+          Missing <code>client_id</code> parameter.
         </p>
       </div>
     );
   }
 
-  if (!authed) {
+  // No refresh token — show setup instructions
+  if (!authed && !refreshTokenParam) {
     return (
       <div className="setup">
         <button
@@ -241,8 +313,8 @@ export default function App({ clientId }: AppProps) {
         </button>
         {error && <p className="error">{error}</p>}
         <p className="hint">
-          You only need to do this once per browser. After connecting, the widget
-          will remember your session.
+          Authenticate here, then copy the refresh token into your Pogly widget
+          variables.
         </p>
       </div>
     );
@@ -252,16 +324,6 @@ export default function App({ clientId }: AppProps) {
     return (
       <div className="setup">
         <p className="error">{error}</p>
-        <button
-          className="auth-btn"
-          onClick={() => {
-            logout();
-            setAuthed(false);
-            setError(null);
-          }}
-        >
-          Reconnect
-        </button>
       </div>
     );
   }
