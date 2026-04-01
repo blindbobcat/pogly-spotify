@@ -1,0 +1,21 @@
+{
+  "widgetName": "Spotify Now Playing",
+  "widgetWidth": 420,
+  "widgetHeight": 100,
+  "headerTag": "",
+  "bodyTag": "<iframe src=\"{widget_url}?client_id={client_id}\" allowtransparency=\"true\" allow=\"encrypted-media\"></iframe>",
+  "styleTag": "* { margin: 0; padding: 0; overflow: hidden; } body { background: transparent; } iframe { width: 100%; height: 100%; border: none; background: transparent; }",
+  "scriptTag": "",
+  "variables": [
+    {
+      "variableName": "client_id",
+      "variableType": 1,
+      "variableValue": ""
+    },
+    {
+      "variableName": "widget_url",
+      "variableType": 1,
+      "variableValue": "../spotify-now-playing/"
+    }
+  ]
+}
