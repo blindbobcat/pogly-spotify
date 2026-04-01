@@ -95,10 +95,21 @@ export default function App({ clientId }: AppProps) {
           async (deviceId) => {
             if (!mounted) return;
             setPlayerReady(true);
-            const token = await getValidAccessToken(clientId);
-            if (token) {
-              await transferPlayback(token, deviceId);
+            // Retry transferPlayback a few times — token might not be ready yet
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const token = await getValidAccessToken(clientId);
+              if (token) {
+                try {
+                  await transferPlayback(token, deviceId);
+                  return; // success
+                } catch (e) {
+                  console.warn(`Spotify: transferPlayback attempt ${attempt + 1} failed`, e);
+                }
+              }
+              // Wait before retry
+              await new Promise((r) => setTimeout(r, 1500));
             }
+            console.error("Spotify: transferPlayback failed after 3 attempts");
           },
           (state: PlayerState | null) => {
             if (!mounted || !state) return;
@@ -123,10 +134,12 @@ export default function App({ clientId }: AppProps) {
           (msg) => {
             if (!mounted) return;
             console.error("Spotify Player Error:", msg);
+            // Don't set playerReady=false on transient errors — the SDK may recover
           }
         );
         if (mounted) playerRef.current = player;
-      } catch {
+      } catch (e) {
+        console.error("Spotify: player init failed", e);
         if (mounted) setPlayerReady(false);
       }
     };
@@ -144,7 +157,9 @@ export default function App({ clientId }: AppProps) {
     if (!clientId || playerReady) return;
     const token = await getValidAccessToken(clientId);
     if (!token) {
-      setAuthed(false);
+      // Don't set authed=false here — it would tear down the SDK player.
+      // Just skip this poll cycle; the next one will retry.
+      console.warn("Spotify: token unavailable, will retry next poll");
       return;
     }
     try {
@@ -160,7 +175,8 @@ export default function App({ clientId }: AppProps) {
       setNowPlaying(data);
       setError(null);
     } catch {
-      setError("Failed to fetch playback");
+      // Don't set error state on transient failures — just log and retry
+      console.warn("Spotify: poll failed, will retry");
     }
   }, [clientId, playerReady]);
 

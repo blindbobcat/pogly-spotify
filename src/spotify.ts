@@ -112,11 +112,12 @@ export async function refreshAccessToken(clientId: string): Promise<TokenRespons
   });
 
   if (!response.ok) {
+    // Clear access token but KEEP the refresh token —
+    // in iframe contexts memStore is the only copy, and refresh tokens
+    // can often be retried even after a transient failure.
     memStore.accessToken = null;
-    memStore.refreshToken = null;
     memStore.expiry = 0;
     storageRemove("spotify_access_token");
-    storageRemove("spotify_refresh_token");
     storageRemove("spotify_token_expiry");
     throw new Error("Token refresh failed");
   }
