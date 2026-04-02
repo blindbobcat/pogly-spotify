@@ -15,6 +15,20 @@ import {
 
 const POLL_INTERVAL = 3000;
 
+// Debug logging — enabled with &debug=1 in URL
+const urlDebug = new URLSearchParams(window.location.search).has("debug");
+const debugLog: string[] = [];
+function dbg(msg: string) {
+  const ts = new Date().toISOString().slice(11, 23);
+  const line = `[${ts}] ${msg}`;
+  console.log("🎵 " + line);
+  debugLog.push(line);
+  if (debugLog.length > 50) debugLog.shift();
+  // Force update the debug overlay if it exists
+  const el = document.getElementById("spotify-debug");
+  if (el) el.textContent = debugLog.join("\n");
+}
+
 interface AppProps {
   clientId: string;
 }
@@ -65,15 +79,18 @@ export default function App({ clientId }: AppProps) {
   // If refresh_token is in URL, store it and mark as authed
   useEffect(() => {
     if (!refreshTokenParam || !clientId) return;
+    dbg(`refresh_token param found (len=${refreshTokenParam.length}), client_id=${clientId.slice(0,8)}...`);
 
     setRefreshToken(refreshTokenParam);
 
     let mounted = true;
     refreshAccessToken(clientId)
       .then(() => {
+        dbg("Initial token refresh SUCCESS");
         if (mounted) setAuthed(true);
       })
-      .catch(() => {
+      .catch((e) => {
+        dbg(`Initial token refresh FAILED: ${e}`);
         if (mounted) setError("Invalid refresh token");
       });
 
@@ -87,6 +104,7 @@ export default function App({ clientId }: AppProps) {
     let mounted = true;
 
     const initPlayer = async () => {
+      dbg("Initializing Web Playback SDK...");
       try {
         const player = await createPlayer(
           clientId,
@@ -94,27 +112,35 @@ export default function App({ clientId }: AppProps) {
           0.5,
           async (deviceId) => {
             if (!mounted) return;
+            dbg(`SDK ready! deviceId=${deviceId.slice(0,8)}...`);
             setPlayerReady(true);
             // Retry transferPlayback a few times — token might not be ready yet
             for (let attempt = 0; attempt < 3; attempt++) {
               const token = await getValidAccessToken(clientId);
+              dbg(`transferPlayback attempt ${attempt + 1}, token=${token ? "OK" : "NULL"}`);
               if (token) {
                 try {
                   await transferPlayback(token, deviceId);
+                  dbg("transferPlayback SUCCESS");
                   return; // success
                 } catch (e) {
-                  console.warn(`Spotify: transferPlayback attempt ${attempt + 1} failed`, e);
+                  dbg(`transferPlayback FAILED: ${e}`);
                 }
               }
               // Wait before retry
               await new Promise((r) => setTimeout(r, 1500));
             }
-            console.error("Spotify: transferPlayback failed after 3 attempts");
+            dbg("transferPlayback failed after 3 attempts");
           },
           (state: PlayerState | null) => {
-            if (!mounted || !state) return;
-            setIsPlaying(!state.paused);
+            if (!mounted) return;
+            if (!state) {
+              dbg("player_state_changed: null state (playback ended or transferred away)");
+              return;
+            }
             const track = state.track_window.current_track;
+            dbg(`state: ${state.paused ? "PAUSED" : "PLAYING"} "${track.name}" pos=${state.position}ms`);
+            setIsPlaying(!state.paused);
             setNowPlaying({
               isPlaying: !state.paused,
               trackName: track.name,
@@ -133,13 +159,16 @@ export default function App({ clientId }: AppProps) {
           },
           (msg) => {
             if (!mounted) return;
-            console.error("Spotify Player Error:", msg);
+            dbg(`SDK ERROR: ${msg}`);
             // Don't set playerReady=false on transient errors — the SDK may recover
           }
         );
-        if (mounted) playerRef.current = player;
+        if (mounted) {
+          dbg("Player connected successfully");
+          playerRef.current = player;
+        }
       } catch (e) {
-        console.error("Spotify: player init failed", e);
+        dbg(`Player init FAILED: ${e}`);
         if (mounted) setPlayerReady(false);
       }
     };
@@ -155,11 +184,10 @@ export default function App({ clientId }: AppProps) {
   // Fallback: poll API if SDK not available
   const fetchNowPlaying = useCallback(async () => {
     if (!clientId || playerReady) return;
+    dbg("Polling API (SDK not ready)...");
     const token = await getValidAccessToken(clientId);
     if (!token) {
-      // Don't set authed=false here — it would tear down the SDK player.
-      // Just skip this poll cycle; the next one will retry.
-      console.warn("Spotify: token unavailable, will retry next poll");
+      dbg("Poll: token unavailable, will retry");
       return;
     }
     try {
@@ -346,70 +374,96 @@ export default function App({ clientId }: AppProps) {
   }
 
   return (
-    <div
-      className={`widget ${visible ? "visible" : "hidden"}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      {nowPlaying && (
-        <>
-          <div className="album-art">
-            <img src={nowPlaying.albumArt} alt={nowPlaying.albumName} />
-            {hovered && (
-              <button className="play-overlay" onClick={handleTogglePlay}>
-                {isPlaying ? (
-                  <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
-                    <rect x="6" y="4" width="4" height="16" rx="1" />
-                    <rect x="14" y="4" width="4" height="16" rx="1" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
-                )}
-              </button>
-            )}
-          </div>
-          <div className="track-info">
-            <div className="track-name">{nowPlaying.trackName}</div>
-            <div className="artist-name">{nowPlaying.artistName}</div>
-            {hovered && (
-              <div className="controls">
-                <button className="ctrl-btn" onClick={handlePrev}>
-                  <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-                    <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
-                  </svg>
-                </button>
-                <button className="ctrl-btn ctrl-play" onClick={handleTogglePlay}>
+    <>
+      <div
+        className={`widget ${visible ? "visible" : "hidden"}`}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        {nowPlaying && (
+          <>
+            <div className="album-art">
+              <img src={nowPlaying.albumArt} alt={nowPlaying.albumName} />
+              {hovered && (
+                <button className="play-overlay" onClick={handleTogglePlay}>
                   {isPlaying ? (
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
                       <rect x="6" y="4" width="4" height="16" rx="1" />
                       <rect x="14" y="4" width="4" height="16" rx="1" />
                     </svg>
                   ) : (
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
                       <path d="M8 5v14l11-7z" />
                     </svg>
                   )}
                 </button>
-                <button className="ctrl-btn" onClick={handleNext}>
-                  <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-                    <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
-                  </svg>
-                </button>
+              )}
+            </div>
+            <div className="track-info">
+              <div className="track-name">{nowPlaying.trackName}</div>
+              <div className="artist-name">{nowPlaying.artistName}</div>
+              {hovered && (
+                <div className="controls">
+                  <button className="ctrl-btn" onClick={handlePrev}>
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                      <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
+                    </svg>
+                  </button>
+                  <button className="ctrl-btn ctrl-play" onClick={handleTogglePlay}>
+                    {isPlaying ? (
+                      <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <rect x="6" y="4" width="4" height="16" rx="1" />
+                        <rect x="14" y="4" width="4" height="16" rx="1" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    )}
+                  </button>
+                  <button className="ctrl-btn" onClick={handleNext}>
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                      <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+              <div className="progress-bar">
+                <div className="progress-fill" ref={progressRef} />
               </div>
-            )}
-            <div className="progress-bar">
-              <div className="progress-fill" ref={progressRef} />
+              <div className="time-info">
+                <span>{formatTime(nowPlaying.progressMs)}</span>
+                <span>{formatTime(nowPlaying.durationMs)}</span>
+              </div>
             </div>
-            <div className="time-info">
-              <span>{formatTime(nowPlaying.progressMs)}</span>
-              <span>{formatTime(nowPlaying.durationMs)}</span>
-            </div>
-          </div>
-        </>
+          </>
+        )}
+      </div>
+      {urlDebug && (
+        <pre
+          id="spotify-debug"
+          style={{
+            position: "fixed",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            maxHeight: "40vh",
+            overflow: "auto",
+            background: "rgba(0,0,0,0.9)",
+            color: "#0f0",
+            fontSize: "10px",
+            fontFamily: "monospace",
+            padding: "8px",
+            margin: 0,
+            zIndex: 9999,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-all",
+          }}
+        >
+          {debugLog.join("\n")}
+        </pre>
       )}
-    </div>
+    </>
   );
 }
 

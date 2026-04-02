@@ -3,6 +3,19 @@ const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const SPOTIFY_API_URL = "https://api.spotify.com/v1";
 const SCOPES = "user-read-currently-playing user-read-playback-state user-modify-playback-state streaming";
 
+// Shared debug logger — matches App.tsx's dbg()
+function dbg(msg: string) {
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`🎵 [${ts}] ${msg}`);
+  const el = document.getElementById("spotify-debug");
+  if (el) {
+    el.textContent += `\n[${ts}] ${msg}`;
+    // Keep last 50 lines
+    const lines = el.textContent!.split("\n");
+    if (lines.length > 50) el.textContent = lines.slice(-50).join("\n");
+  }
+}
+
 // In-memory token store (fallback when localStorage is blocked in iframes)
 const memStore: { accessToken: string | null; refreshToken: string | null; expiry: number } = {
   accessToken: null,
@@ -99,6 +112,7 @@ export async function exchangeCodeForToken(
 
 export async function refreshAccessToken(clientId: string): Promise<TokenResponse> {
   const refreshToken = memStore.refreshToken ?? storageGet("spotify_refresh_token");
+  dbg(`refreshAccessToken: refreshToken=${refreshToken ? `found(len=${refreshToken.length},src=${memStore.refreshToken ? "mem" : "ls"})` : "MISSING"}`);
   if (!refreshToken) throw new Error("No refresh token");
 
   const response = await fetch(SPOTIFY_TOKEN_URL, {
@@ -133,6 +147,7 @@ function saveTokens(data: TokenResponse): void {
     memStore.refreshToken = data.refresh_token;
   }
   memStore.expiry = Date.now() + data.expires_in * 1000;
+  dbg(`saveTokens: expires_in=${data.expires_in}s, new_refresh=${!!data.refresh_token}`);
 
   storageSet("spotify_access_token", data.access_token);
   if (data.refresh_token) {
@@ -145,13 +160,20 @@ export async function getValidAccessToken(clientId: string): Promise<string | nu
   const token = memStore.accessToken ?? storageGet("spotify_access_token");
   const expiry = memStore.expiry || parseInt(storageGet("spotify_token_expiry") ?? "0");
 
-  if (!token || !expiry) return null;
+  dbg(`getValidAccessToken: token=${token ? "OK" : "NULL"}(src=${memStore.accessToken ? "mem" : "ls"}), expiry=${expiry ? `${Math.round((expiry - Date.now()) / 1000)}s` : "NONE"}`);
+
+  if (!token || !expiry) {
+    dbg("getValidAccessToken: returning null (no token or expiry)");
+    return null;
+  }
 
   if (Date.now() > expiry - 60_000) {
+    dbg("getValidAccessToken: token expired/expiring, refreshing...");
     try {
       const data = await refreshAccessToken(clientId);
       return data.access_token;
-    } catch {
+    } catch (e) {
+      dbg(`getValidAccessToken: refresh failed: ${e}`);
       return null;
     }
   }
@@ -307,8 +329,14 @@ export async function createPlayer(
   const player = new window.Spotify.Player({
     name,
     getOAuthToken: async (cb) => {
+      dbg("SDK getOAuthToken called");
       const token = await getValidAccessToken(clientId);
-      if (token) cb(token);
+      if (token) {
+        dbg(`SDK getOAuthToken: token OK (expires in ${Math.round((memStore.expiry - Date.now()) / 1000)}s)`);
+        cb(token);
+      } else {
+        dbg("SDK getOAuthToken: NO TOKEN — SDK will likely disconnect!");
+      }
     },
     volume,
   });
@@ -319,6 +347,7 @@ export async function createPlayer(
   });
 
   player.addListener("not_ready", () => {
+    dbg("SDK event: not_ready (device went offline)");
     onError("Device went offline");
   });
 
@@ -326,11 +355,22 @@ export async function createPlayer(
     onStateChange(state as PlayerState | null);
   });
 
-  player.addListener("initialization_error", (e) => onError((e as WebPlaybackError).message));
-  player.addListener("authentication_error", (e) => onError((e as WebPlaybackError).message));
-  player.addListener("account_error", (e) => onError((e as WebPlaybackError).message));
+  player.addListener("initialization_error", (e) => {
+    dbg(`SDK initialization_error: ${(e as WebPlaybackError).message}`);
+    onError((e as WebPlaybackError).message);
+  });
+  player.addListener("authentication_error", (e) => {
+    dbg(`SDK authentication_error: ${(e as WebPlaybackError).message}`);
+    onError((e as WebPlaybackError).message);
+  });
+  player.addListener("account_error", (e) => {
+    dbg(`SDK account_error: ${(e as WebPlaybackError).message}`);
+    onError((e as WebPlaybackError).message);
+  });
 
+  dbg("Calling player.connect()...");
   const connected = await player.connect();
+  dbg(`player.connect() returned: ${connected}`);
   if (!connected) throw new Error("Failed to connect player");
 
   return player;
