@@ -10,7 +10,6 @@ function dbg(msg: string) {
   const el = document.getElementById("spotify-debug");
   if (el) {
     el.textContent += `\n[${ts}] ${msg}`;
-    // Keep last 50 lines
     const lines = el.textContent!.split("\n");
     if (lines.length > 50) el.textContent = lines.slice(-50).join("\n");
   }
@@ -104,41 +103,54 @@ export async function exchangeCodeForToken(
   saveTokens(data);
   storageRemove("spotify_code_verifier");
 
-  // Clean up URL
   window.history.replaceState({}, document.title, window.location.pathname);
 
   return data;
 }
 
+// Mutex to prevent concurrent refresh calls
+let refreshPromise: Promise<TokenResponse> | null = null;
+
 export async function refreshAccessToken(clientId: string): Promise<TokenResponse> {
+  // If a refresh is already in progress, wait for it instead of firing another
+  if (refreshPromise) {
+    dbg("refreshAccessToken: waiting for existing refresh...");
+    return refreshPromise;
+  }
+
   const refreshToken = memStore.refreshToken ?? storageGet("spotify_refresh_token");
   dbg(`refreshAccessToken: refreshToken=${refreshToken ? `found(len=${refreshToken.length},src=${memStore.refreshToken ? "mem" : "ls"})` : "MISSING"}`);
   if (!refreshToken) throw new Error("No refresh token");
 
-  const response = await fetch(SPOTIFY_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-  });
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch(SPOTIFY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }),
+      });
 
-  if (!response.ok) {
-    // Clear access token but KEEP the refresh token —
-    // in iframe contexts memStore is the only copy, and refresh tokens
-    // can often be retried even after a transient failure.
-    memStore.accessToken = null;
-    memStore.expiry = 0;
-    storageRemove("spotify_access_token");
-    storageRemove("spotify_token_expiry");
-    throw new Error("Token refresh failed");
-  }
+      if (!response.ok) {
+        memStore.accessToken = null;
+        memStore.expiry = 0;
+        storageRemove("spotify_access_token");
+        storageRemove("spotify_token_expiry");
+        throw new Error(`Token refresh failed: ${response.status}`);
+      }
 
-  const data = await response.json();
-  saveTokens(data);
-  return data;
+      const data = await response.json();
+      saveTokens(data);
+      return data;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
 }
 
 function saveTokens(data: TokenResponse): void {
@@ -179,6 +191,14 @@ export async function getValidAccessToken(clientId: string): Promise<string | nu
   }
 
   return token;
+}
+
+/**
+ * Returns the cached access token synchronously (no refresh).
+ * Used by the SDK's getOAuthToken callback to avoid async timing issues.
+ */
+export function getCachedAccessToken(): string | null {
+  return memStore.accessToken ?? storageGet("spotify_access_token") ?? null;
 }
 
 export function setRefreshToken(token: string): void {
@@ -238,14 +258,17 @@ export async function getCurrentlyPlaying(
 }
 
 export function isAuthenticated(): boolean {
-  return !!localStorage.getItem("spotify_access_token");
+  return !!(memStore.accessToken ?? storageGet("spotify_access_token"));
 }
 
 export function logout(): void {
-  localStorage.removeItem("spotify_access_token");
-  localStorage.removeItem("spotify_refresh_token");
-  localStorage.removeItem("spotify_token_expiry");
-  localStorage.removeItem("spotify_code_verifier");
+  memStore.accessToken = null;
+  memStore.refreshToken = null;
+  memStore.expiry = 0;
+  storageRemove("spotify_access_token");
+  storageRemove("spotify_refresh_token");
+  storageRemove("spotify_token_expiry");
+  storageRemove("spotify_code_verifier");
 }
 
 // ─── Web Playback SDK ───
@@ -328,21 +351,49 @@ export async function createPlayer(
 
   const player = new window.Spotify.Player({
     name,
-    getOAuthToken: async (cb) => {
-      dbg("SDK getOAuthToken called");
-      const token = await getValidAccessToken(clientId);
-      if (token) {
-        dbg(`SDK getOAuthToken: token OK (expires in ${Math.round((memStore.expiry - Date.now()) / 1000)}s)`);
-        cb(token);
-      } else {
-        dbg("SDK getOAuthToken: NO TOKEN — SDK will likely disconnect!");
+    getOAuthToken: (cb) => {
+      // CRITICAL: provide token synchronously first from cache,
+      // then kick off async refresh in background if needed.
+      // Some browsers/SDK versions don't wait for async callbacks.
+      const cached = getCachedAccessToken();
+      const expiry = memStore.expiry || parseInt(storageGet("spotify_token_expiry") ?? "0");
+      const expiresIn = Math.round((expiry - Date.now()) / 1000);
+
+      dbg(`SDK getOAuthToken: cached=${cached ? "OK" : "NULL"}, expires in ${expiresIn}s`);
+
+      if (cached && expiresIn > 120) {
+        // Token is valid and not expiring soon — use it immediately
+        cb(cached);
+        return;
       }
+
+      if (cached && expiresIn > 0) {
+        // Token still valid but expiring soon — use it now, refresh in background
+        cb(cached);
+        dbg("SDK getOAuthToken: refreshing in background...");
+        refreshAccessToken(clientId).catch((e) => dbg(`Background refresh failed: ${e}`));
+        return;
+      }
+
+      // Token expired or missing — must refresh before calling cb
+      dbg("SDK getOAuthToken: token expired, refreshing...");
+      refreshAccessToken(clientId)
+        .then((data) => {
+          dbg("SDK getOAuthToken: refresh done, calling cb");
+          cb(data.access_token);
+        })
+        .catch((e) => {
+          dbg(`SDK getOAuthToken: refresh FAILED: ${e} — SDK will likely disconnect`);
+          // Still try to pass the expired token — SDK might accept it briefly
+          if (cached) cb(cached);
+        });
     },
     volume,
   });
 
   player.addListener("ready", (data) => {
     const { device_id } = data as { device_id: string };
+    dbg(`SDK ready: device_id=${device_id.slice(0,8)}...`);
     onReady(device_id);
   });
 
@@ -377,7 +428,7 @@ export async function createPlayer(
 }
 
 export async function transferPlayback(accessToken: string, deviceId: string): Promise<void> {
-  await fetch(`${SPOTIFY_API_URL}/me/player`, {
+  const resp = await fetch(`${SPOTIFY_API_URL}/me/player`, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -385,4 +436,5 @@ export async function transferPlayback(accessToken: string, deviceId: string): P
     },
     body: JSON.stringify({ device_ids: [deviceId], play: true }),
   });
+  dbg(`transferPlayback: status=${resp.status}`);
 }

@@ -52,6 +52,8 @@ export default function App({ clientId }: AppProps) {
     timestamp: number;
   } | null>(null);
   const playerRef = useRef<SpotifyPlayer | null>(null);
+  const deviceIdRef = useRef<string | null>(null);
+  const reconnectTimerRef = useRef<number>(0);
 
   // Read refresh_token from URL params
   const params = new URLSearchParams(window.location.search);
@@ -113,6 +115,7 @@ export default function App({ clientId }: AppProps) {
           async (deviceId) => {
             if (!mounted) return;
             dbg(`SDK ready! deviceId=${deviceId.slice(0,8)}...`);
+            deviceIdRef.current = deviceId;
             setPlayerReady(true);
             // Retry transferPlayback a few times — token might not be ready yet
             for (let attempt = 0; attempt < 3; attempt++) {
@@ -135,7 +138,22 @@ export default function App({ clientId }: AppProps) {
           (state: PlayerState | null) => {
             if (!mounted) return;
             if (!state) {
-              dbg("player_state_changed: null state (playback ended or transferred away)");
+              dbg("player_state_changed: null state — scheduling reconnect in 5s");
+              // Playback was lost — try to reclaim it after a short delay
+              clearTimeout(reconnectTimerRef.current);
+              reconnectTimerRef.current = window.setTimeout(async () => {
+                if (!mounted || !deviceIdRef.current) return;
+                dbg("Auto-reconnecting: transferring playback back...");
+                const token = await getValidAccessToken(clientId);
+                if (token && deviceIdRef.current) {
+                  try {
+                    await transferPlayback(token, deviceIdRef.current);
+                    dbg("Auto-reconnect: transferPlayback SUCCESS");
+                  } catch (e) {
+                    dbg(`Auto-reconnect: transferPlayback failed: ${e}`);
+                  }
+                }
+              }, 5000);
               return;
             }
             const track = state.track_window.current_track;
@@ -160,7 +178,19 @@ export default function App({ clientId }: AppProps) {
           (msg) => {
             if (!mounted) return;
             dbg(`SDK ERROR: ${msg}`);
-            // Don't set playerReady=false on transient errors — the SDK may recover
+            // Try to reconnect after errors
+            if (msg === "Device went offline" && deviceIdRef.current) {
+              dbg("Attempting player.connect() reconnect in 3s...");
+              setTimeout(async () => {
+                if (!mounted || !playerRef.current) return;
+                try {
+                  const ok = await playerRef.current.connect();
+                  dbg(`Reconnect player.connect(): ${ok}`);
+                } catch (e) {
+                  dbg(`Reconnect failed: ${e}`);
+                }
+              }, 3000);
+            }
           }
         );
         if (mounted) {
@@ -177,6 +207,7 @@ export default function App({ clientId }: AppProps) {
 
     return () => {
       mounted = false;
+      clearTimeout(reconnectTimerRef.current);
       playerRef.current?.disconnect();
     };
   }, [authed, clientId]);
