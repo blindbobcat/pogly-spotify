@@ -22,8 +22,17 @@ if (clientIdParam) {
 }
 const clientId = clientIdParam ?? memClientId ?? safeGet("spotify_client_id") ?? "";
 
+// Volume: 0-100 from URL param, default 50
+const volumeParam = params.get("volume");
+const volume = Math.max(0, Math.min(100, parseInt(volumeParam ?? "50", 10))) / 100;
+
+// Playback controls via URL params (toggled from Pogly variables)
+const playPause = params.get("play_pause") === "true";
+const skip = params.get("skip") === "true";
+const prev = params.get("prev") === "true";
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App clientId={clientId} />
+    <App clientId={clientId} volume={volume} playPause={playPause} skip={skip} prev={prev} />
   </StrictMode>
 );

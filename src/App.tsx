@@ -31,9 +31,13 @@ function dbg(msg: string) {
 
 interface AppProps {
   clientId: string;
+  volume: number;
+  playPause: boolean;
+  skip: boolean;
+  prev: boolean;
 }
 
-export default function App({ clientId }: AppProps) {
+export default function App({ clientId, volume, playPause, skip, prev }: AppProps) {
   const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
   const [authed, setAuthed] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +103,54 @@ export default function App({ clientId }: AppProps) {
     return () => { mounted = false; };
   }, [refreshTokenParam, clientId]);
 
+  // Handle playback control triggers from Pogly variables
+  // When Pogly reloads the iframe with these set to true, fire the API command
+  useEffect(() => {
+    if (!authed || !clientId) return;
+    if (!playPause && !skip && !prev) return;
+
+    const fireControls = async () => {
+      const token = await getValidAccessToken(clientId);
+      if (!token) return;
+
+      if (skip) {
+        dbg("Control: skip triggered");
+        await fetch("https://api.spotify.com/v1/me/player/next", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+      if (prev) {
+        dbg("Control: prev triggered");
+        await fetch("https://api.spotify.com/v1/me/player/previous", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+      if (playPause) {
+        dbg("Control: play/pause triggered");
+        // Check current state to toggle
+        try {
+          const resp = await fetch("https://api.spotify.com/v1/me/player", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const endpoint = data.is_playing ? "pause" : "play";
+            await fetch(`https://api.spotify.com/v1/me/player/${endpoint}`, {
+              method: "PUT",
+              headers: { Authorization: `Bearer ${token}` },
+            });
+          }
+        } catch (e) {
+          dbg(`Control: play/pause failed: ${e}`);
+        }
+      }
+    };
+
+    fireControls();
+  }, [authed, clientId, playPause, skip, prev]);
+
   // Initialize Web Playback SDK
   useEffect(() => {
     if (!authed || !clientId) return;
@@ -111,7 +163,7 @@ export default function App({ clientId }: AppProps) {
         const player = await createPlayer(
           clientId,
           "Pogly Spotify Widget",
-          0.5,
+          volume,
           async (deviceId) => {
             if (!mounted) return;
             dbg(`SDK ready! deviceId=${deviceId.slice(0,8)}...`);
